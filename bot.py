@@ -334,13 +334,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    user_id = update.effective_user.id if update.effective_user else None
-if user_id is None or not is_allowed_user_id(user_id):
-    try:
-        await q.answer("Acceso denegado / Доступ запрещён", show_alert=True)
-    except Exception:
-        pass
-    return
+        user_id = update.effective_user.id if update.effective_user else None
+    if user_id is None or not is_allowed_user_id(user_id):
+        try:
+            await q.answer("Acceso denegado / Доступ запрещён", show_alert=True)
+        except Exception:
+            pass
+        return
+
     state = load_state()
     chat_id = q.message.chat_id
     lang = get_lang(state, chat_id)
@@ -533,5 +534,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
