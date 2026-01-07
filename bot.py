@@ -16,7 +16,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ====== CONFIG ======
-import os
+ALLOWED_USER_IDS = {1391262954, 937307714}  # reemplaza por los 2 IDs reales
 TOKEN = os.environ.get("TOKEN")
 STATE_FILE = "savings_state.json"
 
@@ -87,6 +87,9 @@ def tr(lang: str, key: str) -> str:
     if lang not in T:
         lang = "es"
     return T[lang].get(key, key)
+
+def is_allowed_user_id(user_id: int) -> bool:
+    return user_id in ALLOWED_USER_IDS
 
 
 # ====== STATE ======
@@ -317,14 +320,27 @@ def pop_last_action(state: Dict[str, Any], person: str) -> bool:
 
 # ====== HANDLERS ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Force-create JSON on /start
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id is None or not is_allowed_user_id(user_id):
+        await update.message.reply_text("Acceso denegado / Доступ запрещён")
+        return
+
+    # Fuerza crear/guardar JSON
     state = load_state()
     save_state(state)
-    await update.message.reply_text(tr("es", "choose_lang"), reply_markup=lang_keyboard())
 
+    # Idioma al inicio
+    await update.message.reply_text(tr("es", "choose_lang"), reply_markup=lang_keyboard())
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
+    user_id = update.effective_user.id if update.effective_user else None
+if user_id is None or not is_allowed_user_id(user_id):
+    try:
+        await q.answer("Acceso denegado / Доступ запрещён", show_alert=True)
+    except Exception:
+        pass
+    return
     state = load_state()
     chat_id = q.message.chat_id
     lang = get_lang(state, chat_id)
@@ -517,3 +533,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
