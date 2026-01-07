@@ -10,6 +10,8 @@
 
 import json
 import os
+from supabase import create_client
+
 from typing import Dict, Any, List, Tuple, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,6 +20,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ====== CONFIG ======
 ALLOWED_USER_IDS = {1391262954, 937307714}  # reemplaza por los 2 IDs reales
 TOKEN = os.environ.get("TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+STATE_ROW_ID = "main"
+
 STATE_FILE = "savings_state.json"
 
 VALUES = list(range(100, 10001, 100))  # 100..10000
@@ -93,51 +101,34 @@ def is_allowed_user_id(user_id: int) -> bool:
 
 
 # ====== STATE ======
-def load_state() -> Dict[str, Any]:
-    if not os.path.exists(STATE_FILE):
-        return {
-            "Michael": {"pressed": [False] * COUNT, "history": [], "fines": 0},
-            "Madina": {"pressed": [False] * COUNT, "history": [], "fines": 0},
-            "prefs": {},  # chat_id -> {"lang": "es"}
-        }
+def default_state():
+    return {
+        "Michael": {"pressed": [False] * COUNT, "history": [], "fines": 0},
+        "Madina": {"pressed": [False] * COUNT, "history": [], "fines": 0},
+        "prefs": {}
+    }
 
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
 
-    for p in PEOPLE:
-        if p not in data:
-            data[p] = {"pressed": [False] * COUNT, "history": [], "fines": 0}
-        if "pressed" not in data[p] or len(data[p]["pressed"]) != COUNT:
-            data[p]["pressed"] = [False] * COUNT
-        if "history" not in data[p]:
-            data[p]["history"] = []
-        if "fines" not in data[p]:
-            data[p]["fines"] = 0
-
-    if "prefs" not in data:
-        data["prefs"] = {}
+def load_state():
+    try:
+        res = sb.table("bot_state").select("data").eq("id", STATE_ROW_ID).execute()
+        if res.data and len(res.data) > 0:
+            data = res.data[0]["data"]
+        else:
+            data = default_state()
+            sb.table("bot_state").upsert({"id": STATE_ROW_ID, "data": data}).execute()
+    except Exception as e:
+        print("SUPABASE load_state ERROR:", repr(e))
+        data = default_state()
 
     return data
 
 
-def save_state(state: Dict[str, Any]) -> None:
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-
-
-def get_lang(state: Dict[str, Any], chat_id: int) -> str:
-    prefs = state.get("prefs", {})
-    entry = prefs.get(str(chat_id), {})
-    lang = entry.get("lang", "es")
-    return lang if lang in T else "es"
-
-
-def set_lang(state: Dict[str, Any], chat_id: int, lang: str) -> None:
-    if "prefs" not in state:
-        state["prefs"] = {}
-    if lang not in T:
-        lang = "es"
-    state["prefs"][str(chat_id)] = {"lang": lang}
+def save_state(state):
+    try:
+        sb.table("bot_state").upsert({"id": STATE_ROW_ID, "data": state}).execute()
+    except Exception as e:
+        print("SUPABASE save_state ERROR:", repr(e))
 
 
 # ====== CALCS ======
@@ -539,6 +530,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
