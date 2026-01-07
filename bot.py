@@ -1,529 +1,386 @@
-# bot.py
-# Telegram savings bot with:
-# - Language selection at /start (ES/RU)
-# - Person selection (Michael/Madina)
-# - 10 blocks of 10 buttons (100..10000)
-# - Progress saved in savings_state.json
-# - NO Reset button (removed for safety)
-# - "Multas +100" button per person (tracked separately)
-# - Undo works for both last tapped saving button and last fine
-
-import json
 import os
-from supabase import create_client
+from typing import Dict, Any, List, Optional, Tuple
 
-from typing import Dict, Any, List, Tuple, Optional
+from supabase import create_client
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ====== CONFIG ======
-ALLOWED_USER_IDS = {1391262954, 937307714}  # reemplaza por los 2 IDs reales
-TOKEN = os.environ.get("TOKEN")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# =========================
+# CONFIG
+# =========================
 
-print("SUPABASE_URL:", SUPABASE_URL)
-print("SUPABASE_KEY length:", len(SUPABASE_KEY) if SUPABASE_KEY else None)
+TOKEN = os.environ.get("TOKEN", "")
 
-sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-STATE_ROW_ID = "main"
+# Supabase envs (strip to avoid hidden spaces/newlines)
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip().rstrip("/")
+SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
 
+# Allowed users (recommended): comma-separated in Render env ALLOWED_USER_IDS="123,456"
+# If you don't set it, it will allow everyone.
+ALLOWED_USER_IDS_ENV = (os.environ.get("ALLOWED_USER_IDS") or "").strip()
 
-VALUES = list(range(100, 10001, 100))  # 100..10000
-COUNT = len(VALUES)  # 100
-TOTAL_PER_PERSON = sum(VALUES)         # 505000
-TOTAL_COMBINED = TOTAL_PER_PERSON * 2  # 1010000
+def parse_allowed_users(env: str) -> Optional[set]:
+    if not env:
+        return None
+    out = set()
+    for part in env.split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.add(int(part))
+    return out or None
+
+ALLOWED_USER_IDS = parse_allowed_users(ALLOWED_USER_IDS_ENV)
 
 PEOPLE = ["Michael", "Madina"]
+
+# Saving buttons: 100 values of 100..10000 (sum = 505000)
+# If you REALLY want max 9800, tell me and I adjust list to keep 100 buttons.
+VALUES: List[int] = list(range(100, 10001, 100))  # 100..10000
+COUNT = len(VALUES)  # 100
+TOTAL_PER_PERSON = sum(VALUES)  # 505000
+TOTAL_COMBINED = TOTAL_PER_PERSON * 2  # 1010000
+
 FINE_VALUE = 100
 
-# ====== I18N ======
-T = {
+# Supabase init
+# (If env is wrong, it should crash early so you SEE the error in Render logs)
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("Missing SUPABASE_URL or SUPABASE_KEY env var")
+
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+TABLE_NAME = "bot_state"  # must exist
+# One row per chat_id: id = "chat:<chat_id>"
+def row_id(chat_id: int) -> str:
+    return f"chat:{chat_id}"
+
+
+# =========================
+# i18n
+# =========================
+
+T: Dict[str, Dict[str, str]] = {
     "es": {
-        "choose_lang": "Elige el idioma:",
-        "lang_es": "🇪🇸 Español",
-        "lang_ru": "🇷🇺 Русский",
-        "choose_person": "Elige quién está ahorrando:",
-        "select_block": "Selecciona un bloque (10 bloques de 10 botones):",
-        "block": "Bloque",
-        "tap_to_mark": "Toca un botón para marcar ✅",
-        "progress": "📊 Progreso",
-        "undo": "↩️ Deshacer último",
-        "change_person": "👤 Cambiar persona",
-        "back_blocks": "⬅️ Volver a bloques",
-        "fines_btn": "💸 Multas +100",
-        "you_header": "👤",
-        "together_header": "👫 Total juntos",
-        "completed": "✅ Completado",
-        "saved": "💰 Ahorrado",
-        "left": "⏳ Falta",
-        "of": "de",
-        "fines": "💸 Multas",
-        "fines_total": "💸 Multas juntos",
-        "saved_toast": "✅ Guardado:",
-        "fine_toast": "💸 +100",
-        "nothing_to_undo": "Nada que deshacer",
+        "choose_lang": "Elige idioma / Выберите язык:",
+        "choose_person": "Elige persona:",
+        "choose_block": "Elige bloque:",
+        "back": "⬅️ Atrás",
+        "multas": "🚨 Multas +100",
+        "undo": "↩️ Deshacer",
+        "progress_title": "📌 Progreso",
+        "saved": "Ahorrado",
+        "remaining": "Falta",
+        "fines": "Multas",
+        "total_goal": "Meta",
+        "tap_value": "Toca un valor para marcarlo:",
+        "already_done": "✅ Hecho",
+        "empty": "⬜️ Libre",
+        "denied": "Acceso denegado / Доступ запрещён",
+        "myid": "Tu user_id es:",
     },
     "ru": {
-        "choose_lang": "Выберите язык:",
-        "lang_es": "🇪🇸 Español",
-        "lang_ru": "🇷🇺 Русский",
-        "choose_person": "Кто копит?",
-        "select_block": "Выберите блок (10 блоков по 10 кнопок):",
-        "block": "Блок",
-        "tap_to_mark": "Нажмите кнопку, чтобы отметить ✅",
-        "progress": "📊 Прогресс",
-        "undo": "↩️ Отменить последнее",
-        "change_person": "👤 Сменить человека",
-        "back_blocks": "⬅️ Назад к блокам",
-        "fines_btn": "💸 Штраф +100",
-        "you_header": "👤",
-        "together_header": "👫 Итого вместе",
-        "completed": "✅ Выполнено",
-        "saved": "💰 Накоплено",
-        "left": "⏳ Осталось",
-        "of": "из",
-        "fines": "💸 Штрафы",
-        "fines_total": "💸 Штрафы вместе",
-        "saved_toast": "✅ Сохранено:",
-        "fine_toast": "💸 +100",
-        "nothing_to_undo": "Нечего отменять",
+        "choose_lang": "Выберите язык / Elige idioma:",
+        "choose_person": "Выберите человека:",
+        "choose_block": "Выберите блок:",
+        "back": "⬅️ Назад",
+        "multas": "🚨 Штраф +100",
+        "undo": "↩️ Отменить",
+        "progress_title": "📌 Прогресс",
+        "saved": "Накоплено",
+        "remaining": "Осталось",
+        "fines": "Штрафы",
+        "total_goal": "Цель",
+        "tap_value": "Нажмите сумму, чтобы отметить:",
+        "already_done": "✅ Сделано",
+        "empty": "⬜️ Свободно",
+        "denied": "Доступ запрещён / Acceso denegado",
+        "myid": "Ваш user_id:",
     },
 }
 
-
 def tr(lang: str, key: str) -> str:
-    if lang not in T:
-        lang = "es"
-    return T[lang].get(key, key)
-
-def is_allowed_user_id(user_id: int) -> bool:
-    return user_id in ALLOWED_USER_IDS
+    return T.get(lang, T["es"]).get(key, key)
 
 
-# ====== STATE ======
-def default_state():
+# =========================
+# STATE in Supabase
+# =========================
+
+def default_state() -> Dict[str, Any]:
     return {
-        "Michael": {"pressed": [False] * COUNT, "history": [], "fines": 0},
-        "Madina": {"pressed": [False] * COUNT, "history": [], "fines": 0},
-        "prefs": {}
+        "prefs": {},  # per chat
+        "people": {
+            "Michael": {"pressed": [False] * COUNT, "history": [], "fines": 0},
+            "Madina": {"pressed": [False] * COUNT, "history": [], "fines": 0},
+        },
     }
 
-def load_state():
-    try:
-        res = sb.table("bot_state").select("data").eq("id", STATE_ROW_ID).execute()
-        if res.data and len(res.data) > 0:
-            return res.data[0]["data"]
-        data = default_state()
-        sb.table("bot_state").upsert({"id": STATE_ROW_ID, "data": data}).execute()
-        return data
-    except Exception as e:
-        print("SUPABASE load_state ERROR:", repr(e))
-        return default_state()
+def get_lang(state: Dict[str, Any], chat_id: int) -> str:
+    return state.get("prefs", {}).get(str(chat_id), {}).get("lang", "es")
 
-def save_state(state):
+def set_lang(state: Dict[str, Any], chat_id: int, lang: str) -> None:
+    state.setdefault("prefs", {}).setdefault(str(chat_id), {})["lang"] = lang
+
+def get_last_person(state: Dict[str, Any], chat_id: int) -> Optional[str]:
+    return state.get("prefs", {}).get(str(chat_id), {}).get("person")
+
+def set_last_person(state: Dict[str, Any], chat_id: int, person: str) -> None:
+    state.setdefault("prefs", {}).setdefault(str(chat_id), {})["person"] = person
+
+def load_state(chat_id: int) -> Dict[str, Any]:
     try:
-        sb.table("bot_state").upsert({"id": STATE_ROW_ID, "data": state}).execute()
+        res = sb.table(TABLE_NAME).select("data").eq("id", row_id(chat_id)).execute()
+        if res.data and len(res.data) > 0:
+            data = res.data[0]["data"]
+        else:
+            data = default_state()
+            sb.table(TABLE_NAME).upsert({"id": row_id(chat_id), "data": data}).execute()
+    except Exception as e:
+        # If Supabase fails, show error in logs (otherwise you think it "saved" but it didn't)
+        print("SUPABASE load_state ERROR:", repr(e))
+        data = default_state()
+
+    # ensure structure
+    data.setdefault("prefs", {})
+    data.setdefault("people", {})
+    for p in PEOPLE:
+        data["people"].setdefault(p, {"pressed": [False] * COUNT, "history": [], "fines": 0})
+        if "pressed" not in data["people"][p] or len(data["people"][p]["pressed"]) != COUNT:
+            data["people"][p]["pressed"] = [False] * COUNT
+        data["people"][p].setdefault("history", [])
+        data["people"][p].setdefault("fines", 0)
+    return data
+
+def save_state(chat_id: int, state: Dict[str, Any]) -> None:
+    try:
+        sb.table(TABLE_NAME).upsert({"id": row_id(chat_id), "data": state}).execute()
     except Exception as e:
         print("SUPABASE save_state ERROR:", repr(e))
 
 
-# ====== CALCS ======
-def calc_person(state: Dict[str, Any], person: str) -> Tuple[int, int, int]:
-    pressed = state[person]["pressed"]
-    done_sum = sum(v for v, ok in zip(VALUES, pressed) if ok)
-    remaining_sum = TOTAL_PER_PERSON - done_sum
-    done_count = sum(1 for ok in pressed if ok)
-    return done_sum, remaining_sum, done_count
+# =========================
+# Helpers
+# =========================
 
+def is_allowed(update: Update) -> bool:
+    if ALLOWED_USER_IDS is None:
+        return True
+    uid = update.effective_user.id if update.effective_user else None
+    return uid in ALLOWED_USER_IDS if uid is not None else False
 
-def calc_combined(state: Dict[str, Any]) -> Tuple[int, int]:
-    done_m, _, _ = calc_person(state, "Michael")
-    done_a, _, _ = calc_person(state, "Madina")
-    done_total = done_m + done_a
-    remaining_total = TOTAL_COMBINED - done_total
-    return done_total, remaining_total
+async def safe_edit_or_send(q, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
+    try:
+        await q.edit_message_text(text, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await q.message.reply_text(text, reply_markup=reply_markup)
+        except Exception:
+            pass
 
-
-def fines_person(state: Dict[str, Any], person: str) -> int:
-    return int(state[person].get("fines", 0))
-
-
-def fines_combined(state: Dict[str, Any]) -> int:
-    return fines_person(state, "Michael") + fines_person(state, "Madina")
-
-
-# ====== UI ======
 def lang_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    kb = [
         [InlineKeyboardButton("🇪🇸 Español", callback_data="lang:es")],
         [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru")],
-    ])
+    ]
+    return InlineKeyboardMarkup(kb)
 
+def person_menu_kb(lang: str) -> InlineKeyboardMarkup:
+    kb = [
+        [InlineKeyboardButton("Michael", callback_data="person:Michael")],
+        [InlineKeyboardButton("Madina", callback_data="person:Madina")],
+    ]
+    return InlineKeyboardMarkup(kb)
 
-def person_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Michael", callback_data="pick:Michael")],
-        [InlineKeyboardButton("Madina", callback_data="pick:Madina")],
-    ])
+def blocks_menu_kb(lang: str, person: str) -> InlineKeyboardMarkup:
+    # 10 blocks of 10 values
+    kb = []
+    for b in range(10):
+        start = b * 10 + 1
+        end = start + 9
+        kb.append([InlineKeyboardButton(f"{start:02d}-{end:02d}", callback_data=f"block:{person}:{b}")])
+    kb.append([InlineKeyboardButton(tr(lang, "back"), callback_data="back:person")])
+    return InlineKeyboardMarkup(kb)
 
-
-# Blocks: 10 blocks of 10 buttons (indices 0..9, 10..19, ... 90..99)
-def block_range(block: int) -> Tuple[int, int]:
+def value_buttons_kb(lang: str, person: str, block: int, pressed: List[bool]) -> InlineKeyboardMarkup:
+    # block 0..9 -> indices 0..9, 10..19 ...
     start_idx = block * 10
-    end_idx = start_idx + 9
-    return start_idx, end_idx
+    end_idx = start_idx + 10
 
+    kb = []
+    for i in range(start_idx, end_idx):
+        v = VALUES[i]
+        done = pressed[i]
+        label = f"{'✅' if done else '⬜️'} {v}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"tap:{person}:{i}")])
 
-def block_label(block: int) -> str:
-    s, e = block_range(block)
-    return f"{VALUES[s]}–{VALUES[e]}"
+    kb.append([InlineKeyboardButton(tr(lang, "multas"), callback_data=f"fine:{person}")])
+    kb.append([InlineKeyboardButton(tr(lang, "undo"), callback_data=f"undo:{person}")])
+    kb.append([InlineKeyboardButton(tr(lang, "back"), callback_data=f"back:blocks:{person}")])
+    return InlineKeyboardMarkup(kb)
 
+def calc_progress(state: Dict[str, Any], person: str) -> Tuple[int, int, int]:
+    pdata = state["people"][person]
+    saved = sum(v for v, ok in zip(VALUES, pdata["pressed"]) if ok)
+    fines = int(pdata.get("fines", 0))
+    remaining = TOTAL_PER_PERSON - saved
+    return saved, remaining, fines
 
-def render_header(state: Dict[str, Any], lang: str, person: str) -> str:
-    done_sum, remaining_sum, done_count = calc_person(state, person)
-    done_total, remaining_total = calc_combined(state)
-
-    fines_p = fines_person(state, person)
-    fines_total = fines_combined(state)
-
+def progress_text(lang: str, state: Dict[str, Any], person: str) -> str:
+    saved, remaining, fines = calc_progress(state, person)
     return (
-        f"{tr(lang,'you_header')} **{person}**\n"
-        f"{tr(lang,'completed')}: **{done_count}/100**\n"
-        f"{tr(lang,'saved')}: **${done_sum:,}**\n"
-        f"{tr(lang,'left')}: **${remaining_sum:,}** ({tr(lang,'of')} ${TOTAL_PER_PERSON:,})\n"
-        f"{tr(lang,'fines')}: **${fines_p:,}**\n\n"
-        f"**{tr(lang,'together_header')}**\n"
-        f"{tr(lang,'saved')}: **${done_total:,}**\n"
-        f"{tr(lang,'left')}: **${remaining_total:,}** ({tr(lang,'of')} ${TOTAL_COMBINED:,})\n"
-        f"{tr(lang,'fines_total')}: **${fines_total:,}**\n"
+        f"{tr(lang, 'progress_title')} — {person}\n\n"
+        f"✅ {tr(lang, 'saved')}: {saved}\n"
+        f"⏳ {tr(lang, 'remaining')}: {remaining}\n"
+        f"🚨 {tr(lang, 'fines')}: {fines}\n"
+        f"🎯 {tr(lang, 'total_goal')}: {TOTAL_PER_PERSON}\n"
     )
 
 
-def render_blocks_text(state: Dict[str, Any], lang: str, person: str) -> str:
-    return render_header(state, lang, person) + "\n" + tr(lang, "select_block")
+# =========================
+# Handlers
+# =========================
 
-
-def render_block_text(state: Dict[str, Any], lang: str, person: str, block: int) -> str:
-    return (
-        render_header(state, lang, person)
-        + f"\n{tr(lang,'block')}: **{block_label(block)}**\n"
-        + tr(lang, "tap_to_mark")
-    )
-
-
-def blocks_keyboard(lang: str, person: str) -> InlineKeyboardMarkup:
-    rows = []
-    for i in range(0, 10, 2):
-        rows.append([
-            InlineKeyboardButton(block_label(i), callback_data=f"open:{person}:{i}"),
-            InlineKeyboardButton(block_label(i + 1), callback_data=f"open:{person}:{i+1}"),
-        ])
-
-    rows.append([
-        InlineKeyboardButton(tr(lang, "fines_btn"), callback_data=f"fine:{person}"),
-        InlineKeyboardButton(tr(lang, "undo"), callback_data=f"undo:{person}"),
-    ])
-    rows.append([
-        InlineKeyboardButton(tr(lang, "progress"), callback_data=f"stats:{person}"),
-        InlineKeyboardButton(tr(lang, "change_person"), callback_data="change_person"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def block_keyboard(state: Dict[str, Any], lang: str, person: str, block: int) -> InlineKeyboardMarkup:
-    pressed = state[person]["pressed"]
-    s, e = block_range(block)
-
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-    for idx in range(s, e + 1):
-        val = VALUES[idx]
-        label = f"✅{val}" if pressed[idx] else f"{val}"
-        row.append(InlineKeyboardButton(label, callback_data=f"tap:{person}:{idx}:{block}"))
-        if len(row) == 5:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-
-    rows.append([
-        InlineKeyboardButton(tr(lang, "back_blocks"), callback_data=f"back:{person}"),
-        InlineKeyboardButton(tr(lang, "progress"), callback_data=f"stats:{person}:{block}"),
-    ])
-    rows.append([
-        InlineKeyboardButton(tr(lang, "fines_btn"), callback_data=f"fine:{person}:{block}"),
-        InlineKeyboardButton(tr(lang, "undo"), callback_data=f"undo:{person}:{block}"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-# ====== HELPERS ======
-async def safe_edit_or_send(q, text: str, reply_markup: InlineKeyboardMarkup, parse_mode: Optional[str] = None):
-    """Try to edit the existing message; if Telegram refuses, send a new message."""
-    try:
-        await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except Exception:
-        await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-
-
-def push_history_tap(state: Dict[str, Any], person: str, idx: int) -> None:
-    # New format: dict. Keep compatibility if old ints exist.
-    state[person]["history"].append({"t": "tap", "i": idx})
-
-
-def push_history_fine(state: Dict[str, Any], person: str) -> None:
-    state[person]["history"].append({"t": "fine"})
-
-
-def pop_last_action(state: Dict[str, Any], person: str) -> bool:
-    """Undo last action (tap or fine). Returns True if something undone."""
-    hist = state[person]["history"]
-    if not hist:
-        return False
-
-    last = hist.pop()
-
-    # Backward compatibility (old code might have int idx stored)
-    if isinstance(last, int):
-        idx = last
-        if 0 <= idx < COUNT:
-            state[person]["pressed"][idx] = False
-            return True
-        return False
-
-    if isinstance(last, dict):
-        t = last.get("t")
-        if t == "tap":
-            idx = int(last.get("i", -1))
-            if 0 <= idx < COUNT:
-                state[person]["pressed"][idx] = False
-                return True
-        elif t == "fine":
-            state[person]["fines"] = max(0, int(state[person].get("fines", 0)) - FINE_VALUE)
-            return True
-
-    return False
-
-
-# ====== HANDLERS ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id is None or not is_allowed_user_id(user_id):
+    if not is_allowed(update):
         await update.message.reply_text("Acceso denegado / Доступ запрещён")
         return
 
-    # Fuerza crear/guardar JSON
-    state = load_state()
-    save_state(state)
+    chat_id = update.effective_chat.id
+    state = load_state(chat_id)
+    save_state(chat_id, state)
 
-    # Idioma al inicio
     await update.message.reply_text(tr("es", "choose_lang"), reply_markup=lang_keyboard())
-    return
 
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id if update.effective_user else None
+    await update.message.reply_text(f"{tr('es','myid')} {uid}")
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
+    await q.answer()
 
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id is None or not is_allowed_user_id(user_id):
+    if not is_allowed(update):
         try:
             await q.answer("Acceso denegado / Доступ запрещён", show_alert=True)
         except Exception:
             pass
         return
 
-    state = load_state()
     chat_id = q.message.chat_id
+    state = load_state(chat_id)
     lang = get_lang(state, chat_id)
 
     data = q.data
-
-    # (aquí sigue TODO tu código de callbacks tal como lo tenías)
 
     # Language selection
     if data.startswith("lang:"):
         lang = data.split(":", 1)[1]
         set_lang(state, chat_id, lang)
-        save_state(state)
-        await q.answer()
-        await safe_edit_or_send(q, tr(lang, "choose_person"), person_menu_kb(), None)
+        save_state(chat_id, state)
+        await safe_edit_or_send(q, tr(lang, "choose_person"), person_menu_kb(lang))
         return
 
-    # Change person
-    if data == "change_person":
-        lang = get_lang(state, chat_id)
-        await q.answer()
-        await safe_edit_or_send(q, tr(lang, "choose_person"), person_menu_kb(), None)
+    # Back to person
+    if data == "back:person":
+        await safe_edit_or_send(q, tr(lang, "choose_person"), person_menu_kb(lang))
         return
 
-    # Pick person
-    if data.startswith("pick:"):
+    # Person selection
+    if data.startswith("person:"):
         person = data.split(":", 1)[1]
-        lang = get_lang(state, chat_id)
-        await q.answer()
-        await safe_edit_or_send(
-            q,
-            render_blocks_text(state, lang, person),
-            blocks_keyboard(lang, person),
-            "Markdown",
-        )
+        set_last_person(state, chat_id, person)
+        save_state(chat_id, state)
+        await safe_edit_or_send(q, tr(lang, "choose_block"), blocks_menu_kb(lang, person))
         return
 
     # Back to blocks
-    if data.startswith("back:"):
-        _, person = data.split(":")
-        lang = get_lang(state, chat_id)
-        await q.answer()
-        await safe_edit_or_send(
-            q,
-            render_blocks_text(state, lang, person),
-            blocks_keyboard(lang, person),
-            "Markdown",
-        )
+    if data.startswith("back:blocks:"):
+        person = data.split(":", 2)[2]
+        await safe_edit_or_send(q, tr(lang, "choose_block"), blocks_menu_kb(lang, person))
         return
 
     # Open block
-    if data.startswith("open:"):
-        _, person, block_str = data.split(":")
-        block = int(block_str)
-        lang = get_lang(state, chat_id)
-        await q.answer()
-        await safe_edit_or_send(
-            q,
-            render_block_text(state, lang, person, block),
-            block_keyboard(state, lang, person, block),
-            "Markdown",
-        )
+    if data.startswith("block:"):
+        _, person, block_s = data.split(":")
+        block = int(block_s)
+        pressed = state["people"][person]["pressed"]
+        text = progress_text(lang, state, person) + "\n" + tr(lang, "tap_value")
+        await safe_edit_or_send(q, text, value_buttons_kb(lang, person, block, pressed))
         return
 
-    # Tap (mark savings button)
+    # Tap value
     if data.startswith("tap:"):
-        _, person, idx_str, block_str = data.split(":")
-        idx = int(idx_str)
-        block = int(block_str)
-        lang = get_lang(state, chat_id)
+        _, person, idx_s = data.split(":")
+        idx = int(idx_s)
 
-        val = VALUES[idx]
+        pdata = state["people"][person]
+        if not pdata["pressed"][idx]:
+            pdata["pressed"][idx] = True
+            pdata["history"].append({"type": "tap", "idx": idx})
+            save_state(chat_id, state)
 
-        if not state[person]["pressed"][idx]:
-            state[person]["pressed"][idx] = True
-            push_history_tap(state, person, idx)
-            save_state(state)
-
-        # toast
-        try:
-            await q.answer(f"{tr(lang,'saved_toast')} {val}", show_alert=False)
-        except Exception:
-            await q.answer()
-
-        await safe_edit_or_send(
-            q,
-            render_block_text(state, lang, person, block),
-            block_keyboard(state, lang, person, block),
-            "Markdown",
-        )
+        # return to same block view
+        block = idx // 10
+        pressed = pdata["pressed"]
+        text = progress_text(lang, state, person) + "\n" + tr(lang, "tap_value")
+        await safe_edit_or_send(q, text, value_buttons_kb(lang, person, block, pressed))
         return
 
-    # Fine (+100)
+    # Fine +100
     if data.startswith("fine:"):
-        parts = data.split(":")
-        person = parts[1]
-        block = int(parts[2]) if len(parts) == 3 else None
-        lang = get_lang(state, chat_id)
+        _, person = data.split(":")
+        pdata = state["people"][person]
+        pdata["fines"] = int(pdata.get("fines", 0)) + FINE_VALUE
+        pdata["history"].append({"type": "fine"})
+        save_state(chat_id, state)
 
-        state[person]["fines"] = int(state[person].get("fines", 0)) + FINE_VALUE
-        push_history_fine(state, person)
-        save_state(state)
-
-        try:
-            await q.answer(tr(lang, "fine_toast"), show_alert=False)
-        except Exception:
-            await q.answer()
-
-        if block is None:
-            await safe_edit_or_send(
-                q,
-                render_blocks_text(state, lang, person),
-                blocks_keyboard(lang, person),
-                "Markdown",
-            )
-        else:
-            await safe_edit_or_send(
-                q,
-                render_block_text(state, lang, person, block),
-                block_keyboard(state, lang, person, block),
-                "Markdown",
-            )
-        return
-
-    # Stats (refresh)
-    if data.startswith("stats:"):
-        parts = data.split(":")
-        person = parts[1]
-        lang = get_lang(state, chat_id)
-        await q.answer()
-
-        if len(parts) == 3:
-            block = int(parts[2])
-            await safe_edit_or_send(
-                q,
-                render_block_text(state, lang, person, block),
-                block_keyboard(state, lang, person, block),
-                "Markdown",
-            )
-        else:
-            await safe_edit_or_send(
-                q,
-                render_blocks_text(state, lang, person),
-                blocks_keyboard(lang, person),
-                "Markdown",
-            )
+        # stay on last block if possible
+        last_block = 0
+        # try infer from message buttons? simplest keep 0
+        pressed = pdata["pressed"]
+        text = progress_text(lang, state, person) + "\n" + tr(lang, "tap_value")
+        await safe_edit_or_send(q, text, value_buttons_kb(lang, person, last_block, pressed))
         return
 
     # Undo
     if data.startswith("undo:"):
-        parts = data.split(":")
-        person = parts[1]
-        block = int(parts[2]) if len(parts) == 3 else None
-        lang = get_lang(state, chat_id)
+        _, person = data.split(":")
+        pdata = state["people"][person]
+        if pdata["history"]:
+            last = pdata["history"].pop()
+            if last["type"] == "tap":
+                idx = int(last["idx"])
+                if 0 <= idx < COUNT:
+                    pdata["pressed"][idx] = False
+                    block = idx // 10
+                else:
+                    block = 0
+            elif last["type"] == "fine":
+                pdata["fines"] = max(0, int(pdata.get("fines", 0)) - FINE_VALUE)
+                block = 0
+            else:
+                block = 0
 
-        undone = pop_last_action(state, person)
-        if undone:
-            save_state(state)
-
-        try:
-            await q.answer(tr(lang, "nothing_to_undo") if not undone else "", show_alert=False)
-        except Exception:
-            await q.answer()
-
-        if block is None:
-            await safe_edit_or_send(
-                q,
-                render_blocks_text(state, lang, person),
-                blocks_keyboard(lang, person),
-                "Markdown",
-            )
+            save_state(chat_id, state)
         else:
-            await safe_edit_or_send(
-                q,
-                render_block_text(state, lang, person, block),
-                block_keyboard(state, lang, person, block),
-                "Markdown",
-            )
-        return
+            block = 0
 
-    # default
-    await q.answer()
+        pressed = pdata["pressed"]
+        text = progress_text(lang, state, person) + "\n" + tr(lang, "tap_value")
+        await safe_edit_or_send(q, text, value_buttons_kb(lang, person, block, pressed))
+        return
 
 
 def main() -> None:
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CallbackQueryHandler(on_callback))
-    print("✅ Bot corriendo… (Ctrl+C para parar)")
-    app.run_polling()
+
+    print("Bot started.")
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
