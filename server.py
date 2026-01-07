@@ -8,7 +8,7 @@ app = Flask(__name__)
 def home():
     return "OK", 200
 
-# Arranca el bot una sola vez al iniciar el servicio
+# Start the bot once
 bot_process = None
 
 def start_bot():
@@ -21,3 +21,4 @@ start_bot()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
