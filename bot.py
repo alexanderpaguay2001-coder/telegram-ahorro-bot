@@ -48,6 +48,11 @@ FINE_VALUE = 100
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("Missing SUPABASE_URL or SUPABASE_KEY env var")
 
+print("SUPABASE_URL =", repr(SUPABASE_URL))
+print("SUPABASE_KEY_LEN =", len(SUPABASE_KEY))
+print("SUPABASE_KEY_FIRST20 =", repr(SUPABASE_KEY[:20]))
+print("SUPABASE_KEY_LAST20 =", repr(SUPABASE_KEY[-20:]))
+
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TABLE_NAME = "bot_state"  # must exist
@@ -385,6 +390,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
