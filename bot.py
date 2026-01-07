@@ -23,10 +23,12 @@ TOKEN = os.environ.get("TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
+print("SUPABASE_URL:", SUPABASE_URL)
+print("SUPABASE_KEY length:", len(SUPABASE_KEY) if SUPABASE_KEY else None)
+
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 STATE_ROW_ID = "main"
 
-STATE_FILE = "savings_state.json"
 
 VALUES = list(range(100, 10001, 100))  # 100..10000
 COUNT = len(VALUES)  # 100
@@ -108,21 +110,17 @@ def default_state():
         "prefs": {}
     }
 
-
 def load_state():
     try:
         res = sb.table("bot_state").select("data").eq("id", STATE_ROW_ID).execute()
         if res.data and len(res.data) > 0:
-            data = res.data[0]["data"]
-        else:
-            data = default_state()
-            sb.table("bot_state").upsert({"id": STATE_ROW_ID, "data": data}).execute()
+            return res.data[0]["data"]
+        data = default_state()
+        sb.table("bot_state").upsert({"id": STATE_ROW_ID, "data": data}).execute()
+        return data
     except Exception as e:
         print("SUPABASE load_state ERROR:", repr(e))
-        data = default_state()
-
-    return data
-
+        return default_state()
 
 def save_state(state):
     try:
@@ -530,6 +528,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
