@@ -1,8 +1,6 @@
 import os
-import threading
+import subprocess
 from flask import Flask
-
-import bot  # tu archivo bot.py
 
 app = Flask(__name__)
 
@@ -10,12 +8,16 @@ app = Flask(__name__)
 def home():
     return "OK", 200
 
-def run_bot():
-    bot.main()
+# Arranca el bot una sola vez al iniciar el servicio
+bot_process = None
+
+def start_bot():
+    global bot_process
+    if bot_process is None or bot_process.poll() is not None:
+        bot_process = subprocess.Popen(["python3", "bot.py"])
+
+start_bot()
 
 if __name__ == "__main__":
-    t = threading.Thread(target=run_bot, daemon=True)
-    t.start()
-
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
