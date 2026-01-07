@@ -331,10 +331,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Idioma al inicio
     await update.message.reply_text(tr("es", "choose_lang"), reply_markup=lang_keyboard())
+    return
+
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-        user_id = update.effective_user.id if update.effective_user else None
+
+    user_id = update.effective_user.id if update.effective_user else None
     if user_id is None or not is_allowed_user_id(user_id):
         try:
             await q.answer("Acceso denegado / Доступ запрещён", show_alert=True)
@@ -347,6 +350,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lang = get_lang(state, chat_id)
 
     data = q.data
+
+    # (aquí sigue TODO tu código de callbacks tal como lo tenías)
 
     # Language selection
     if data.startswith("lang:"):
@@ -534,6 +539,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
